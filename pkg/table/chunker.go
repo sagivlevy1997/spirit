@@ -79,6 +79,9 @@ type ChunkerConfig struct {
 	// table has an auto-increment primary key.
 	Key   string
 	Where string
+	// FixedChunkSize, when > 0, pins the copy chunk size to this many rows and
+	// disables dynamic chunk sizing (gh-ost style). 0 keeps adaptive behavior.
+	FixedChunkSize uint64
 }
 
 // NewChunker creates a new MappedChunker for the given source table.
@@ -108,7 +111,7 @@ func NewChunker(t *TableInfo, config ChunkerConfig) (MappedChunker, error) {
 			Ti:                t,
 			NewTi:             newTable,
 			columnMapping:     config.ColumnMapping,
-			dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime},
+			dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime, disableDynamicChunker: config.FixedChunkSize > 0, fixedChunkSize: config.FixedChunkSize},
 			watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
 			logger:            config.Logger,
 		}, nil
@@ -119,7 +122,7 @@ func NewChunker(t *TableInfo, config ChunkerConfig) (MappedChunker, error) {
 		columnMapping:     config.ColumnMapping,
 		keyName:           config.Key,
 		where:             config.Where,
-		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime},
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime, disableDynamicChunker: config.FixedChunkSize > 0, fixedChunkSize: config.FixedChunkSize, minChunkSize: StartingChunkSize},
 		watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
 		logger:            config.Logger,
 	}, nil

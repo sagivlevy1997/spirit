@@ -83,7 +83,7 @@ func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 				"min-val", minVal,
 				"max-val", maxVal,
 				"max-dynamic-row-size", MaxDynamicRowSize)
-			t.chunkSize = StartingChunkSize // reset
+			t.chunkSize = t.initialChunkSize() // reset
 			t.chunkPrefetchingEnabled = false
 		}
 
@@ -335,7 +335,7 @@ func (t *chunkerOptimistic) Reset() error {
 	t.chunkPtr = NewNilDatum(t.Ti.keyDatums[0])
 	t.checkpointHighPtr = NewNilDatum(t.Ti.keyDatums[0]) // reset checkpoint high pointer
 	t.finalChunkSent = false
-	t.chunkSize = StartingChunkSize
+	t.chunkSize = t.initialChunkSize()
 	t.watermark = nil
 	t.lowerBoundWatermarkMap = make(map[string]*Chunk, 0)
 	t.inflightChunks = 0
@@ -412,7 +412,7 @@ func (t *chunkerOptimistic) Feedback(chunk *Chunk, d time.Duration, _ uint64) {
 				"max-dynamic-row-size", MaxDynamicRowSize,
 			)
 			t.logger.Warn("switching to prefetch algorithm")
-			t.chunkSize = StartingChunkSize // reset
+			t.chunkSize = t.initialChunkSize() // reset
 			t.chunkPrefetchingEnabled = true
 		}
 		t.updateChunkerTarget(newTarget)
@@ -450,7 +450,7 @@ func (t *chunkerOptimistic) open() (err error) {
 	t.isOpen = true
 	t.chunkPtr = NewNilDatum(t.Ti.keyDatums[0])
 	t.finalChunkSent = false
-	t.chunkSize = StartingChunkSize
+	t.chunkSize = t.initialChunkSize()
 	t.inflightChunks = 0
 
 	// Initialize progress tracking

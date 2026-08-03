@@ -1447,6 +1447,7 @@ func (r *Runner) initChunkers() error {
 		chunkerCfg := table.ChunkerConfig{
 			NewTable:        change.newTable,
 			TargetChunkTime: r.migration.TargetChunkTime,
+			FixedChunkSize:  r.migration.ChunkSize,
 			Logger:          r.logger,
 			ColumnMapping:   columnMapping,
 		}
@@ -1796,6 +1797,7 @@ func (r *Runner) buildContinuousChunker() (table.Chunker, error) {
 		c, err := table.NewChunker(change.table, table.ChunkerConfig{
 			NewTable:        change.newTable,
 			TargetChunkTime: r.migration.TargetChunkTime,
+			FixedChunkSize:  r.migration.ChunkSize,
 			Logger:          r.logger,
 			ColumnMapping:   columnMapping,
 		})

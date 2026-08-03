@@ -319,7 +319,7 @@ func (t *chunkerComposite) Reset() error {
 	// Reset all state to initial values
 	t.chunkPtrs = []Datum{} // reset to empty slice (first chunk)
 	t.finalChunkSent = false
-	t.chunkSize = StartingChunkSize
+	t.chunkSize = t.initialChunkSize()
 	t.watermark = nil
 	t.lowerBoundWatermarkMap = make(map[string]*Chunk, 0)
 	t.inflightChunks = 0
@@ -367,12 +367,16 @@ func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows ui
 		return
 	}
 
-	// Add feedback to the list.
-	t.chunkTimingInfo = append(t.chunkTimingInfo, d)
+	// Record the (rows, duration) observation for the overhead-aware sizer.
+	// Composite / non-int PK tables carry a large FIXED per-chunk cost (the
+	// boundary seek + network RTT) that the naive time/rows controller misreads
+	// as "too slow", shrinking toward the floor and collapsing throughput.
+	// Modeling time as fixed + rows*marginal lets us grow to amortize instead.
+	t.chunkObservations = append(t.chunkObservations, chunkObservation{rows: actualRows, d: d})
 
 	// If we have enough feedback, re-evaluate the chunk size.
-	if len(t.chunkTimingInfo) > 10 {
-		newTarget, _ := t.calculateNewTargetChunkSize()
+	if len(t.chunkObservations) > 10 {
+		newTarget := t.calculateOverheadAwareTargetChunkSize()
 		t.updateChunkerTarget(newTarget)
 	}
 }
@@ -423,7 +427,7 @@ func (t *chunkerComposite) open() (err error) {
 		t.keyName = "PRIMARY"
 	}
 	t.finalChunkSent = false
-	t.chunkSize = StartingChunkSize
+	t.chunkSize = t.initialChunkSize()
 	t.inflightChunks = 0
 	t.checkpointHighPtr = Datum{} // reset checkpoint high pointer
 
