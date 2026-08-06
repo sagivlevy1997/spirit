@@ -281,7 +281,7 @@ func (t *chunkerComposite) OpenAtWatermark(checkpnt string) error {
 	// below — so a row that no longer exists on the source is removed from
 	// the target rather than resurrected, and a discarded DELETE for it is a
 	// no-op.
-	if t.NewTi != nil {
+	if t.NewTi != nil && !t.NewTi.MaxValue().IsNil() {
 		checkpointHighPtr, err := NewDatum(t.NewTi.MaxValue().Val, t.Ti.MaxValue().Tp)
 		if err != nil {
 			return fmt.Errorf("failed to create checkpointHighPtr: %w", err)
