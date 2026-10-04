@@ -403,6 +403,29 @@ func TestBufferedMultiTableMigration(t *testing.T) {
 	require.Equal(t, 100, count2)
 }
 
+// TestChecksumRetryDelayDefaultsToTheApplyLagBudget pins the SHIPPED value.
+//
+// newTestMigration overrides ChecksumRetryDelay to 50ms for every test in this
+// package, because tests that diverge the tables have nothing to wait for. So
+// without this the production delay would be asserted nowhere in pkg/migration
+// and could be changed to anything -- including a zero, which means something
+// different again -- with the suite still green.
+//
+// It is the apply-lag budget: the time a chunk that mismatched during the pass
+// gets to reconcile before it counts as a difference. Too short and ordinary
+// replication lag is reported as a divergence, which is the failure this whole
+// mechanism exists to stop.
+func TestChecksumRetryDelayDefaultsToTheApplyLagBudget(t *testing.T) {
+	t.Parallel()
+	migration := &Migration{Table: "test_table", Alter: "ENGINE=INNODB"}
+
+	_, err := migration.normalizeOptions()
+	require.NoError(t, err)
+
+	require.Equal(t, checksum.DefaultSingleRetryDelay, migration.ChecksumRetryDelay)
+	require.Equal(t, time.Minute, migration.ChecksumRetryDelay)
+}
+
 func TestMigrationParamsDefaultsUsed(t *testing.T) {
 	t.Parallel()
 	migration := &Migration{Table: "test_table", Alter: "ENGINE=INNODB"}

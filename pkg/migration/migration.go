@@ -72,6 +72,13 @@ type Migration struct {
 
 	CheckpointMaxAge     time.Duration `name:"checkpoint-max-age" help:"Maximum age of a checkpoint before refusing to resume from it" optional:"" default:"168h"`
 	ChecksumYieldTimeout time.Duration `name:"checksum-yield-timeout" help:"Maximum duration for a single checksum pass before yielding to release long-running REPEATABLE READ transactions (reduces InnoDB HLL growth)" optional:"" default:"24h"`
+	// ChecksumRetryDelay is how long a chunk that mismatched during a checksum
+	// pass waits before it is re-read. The target legitimately lags the
+	// source, so a first-read mismatch is deferred rather than counted, and
+	// this is the apply-lag budget it is given to reconcile. Raise it on a
+	// source whose replication is habitually further behind. Zero means "use
+	// the default", not "re-read immediately" -- see checksum.applyRetryDefaults.
+	ChecksumRetryDelay time.Duration `name:"checksum-retry-delay" help:"How long to wait before re-reading a chunk that mismatched during the checksum, so replication apply lag is not mistaken for a divergence" optional:"" default:"1m"`
 
 	// MaxCommitLatency throttles when observed commit latency exceeds this
 	// threshold. Currently auto-enabled only on Aurora (auto-detected); the
@@ -152,6 +159,9 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 	}
 	if m.ChecksumYieldTimeout == 0 {
 		m.ChecksumYieldTimeout = checksum.DefaultYieldTimeout
+	}
+	if m.ChecksumRetryDelay == 0 {
+		m.ChecksumRetryDelay = checksum.DefaultSingleRetryDelay
 	}
 
 	if err := m.normalizeConnectionOptions(); err != nil {
