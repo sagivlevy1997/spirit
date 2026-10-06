@@ -228,14 +228,6 @@ func newTestMigration(t *testing.T, opts ...RunnerOption) *Migration {
 		Database:     cfg.DBName,
 		Threads:      2,
 		WriteThreads: 2,
-		// The shipped 1m is an apply-lag budget: it gives a real change feed
-		// time to catch up before a mismatched chunk is judged. Tests that
-		// diverge the tables hold them diverged, so there is nothing to wait
-		// for -- TestAddUniqueIndexChecksumEnabled alone spent three minutes
-		// of wall clock on it. Not zero, because zero means "use the
-		// default"; TestChecksumRetryDelayDefaultsToTheApplyLagBudget pins
-		// the shipped value so this override cannot hide a change to it.
-		ChecksumRetryDelay: 50 * time.Millisecond,
 	}
 	for _, opt := range opts {
 		opt(migration)

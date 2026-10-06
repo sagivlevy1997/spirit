@@ -118,27 +118,17 @@ type CheckerConfig struct {
 	MaxRetries      int
 	Applier         applier.Applier // optional; indicates it is a distributed checker
 	YieldTimeout    time.Duration   // maximum duration for a single checksum pass before yielding to release long-running transactions
-	// RetryDelay is how long SingleChecker waits before re-reading a chunk
-	// that mismatched during the pass. The target legitimately lags the
-	// source, so a first-read mismatch is deferred rather than counted, and
-	// this is the apply-lag budget it is given to reconcile.
-	RetryDelay time.Duration
-	// MaxSrcChangedCycles bounds how many times a chunk whose SOURCE keeps
-	// changing may be re-queued before it is adjudicated anyway.
-	MaxSrcChangedCycles int
 }
 
 func NewCheckerDefaultConfig() *CheckerConfig {
 	return &CheckerConfig{
-		Concurrency:         4,
-		TargetChunkTime:     1000 * time.Millisecond,
-		DBConfig:            dbconn.NewDBConfig(),
-		Logger:              slog.Default(),
-		FixDifferences:      false,
-		MaxRetries:          3,
-		YieldTimeout:        DefaultYieldTimeout,
-		RetryDelay:          DefaultSingleRetryDelay,
-		MaxSrcChangedCycles: DefaultMaxSrcChangedCycles,
+		Concurrency:     4,
+		TargetChunkTime: 1000 * time.Millisecond,
+		DBConfig:        dbconn.NewDBConfig(),
+		Logger:          slog.Default(),
+		FixDifferences:  false,
+		MaxRetries:      3,
+		YieldTimeout:    DefaultYieldTimeout,
 	}
 }
 
@@ -165,7 +155,6 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 	if config.YieldTimeout == 0 {
 		config.YieldTimeout = DefaultYieldTimeout
 	}
-	applyRetryDefaults(config)
 	if config.Applier != nil {
 		return &DistributedChecker{
 			concurrency:    config.Concurrency,
@@ -180,19 +169,15 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 			yieldTimeout:   config.YieldTimeout,
 		}, nil
 	}
-	c := &SingleChecker{
-		concurrency:         config.Concurrency,
-		db:                  sourceDBs[0],
-		feed:                feeds[0],
-		chunker:             chunker,
-		dbConfig:            config.DBConfig,
-		logger:              config.Logger,
-		fixDifferences:      config.FixDifferences,
-		maxRetries:          config.MaxRetries,
-		yieldTimeout:        config.YieldTimeout,
-		retryDelay:          config.RetryDelay,
-		maxSrcChangedCycles: config.MaxSrcChangedCycles,
-	}
-	c.freshRead = c.freshReadChunk
-	return c, nil
+	return &SingleChecker{
+		concurrency:    config.Concurrency,
+		db:             sourceDBs[0],
+		feed:           feeds[0],
+		chunker:        chunker,
+		dbConfig:       config.DBConfig,
+		logger:         config.Logger,
+		fixDifferences: config.FixDifferences,
+		maxRetries:     config.MaxRetries,
+		yieldTimeout:   config.YieldTimeout,
+	}, nil
 }
