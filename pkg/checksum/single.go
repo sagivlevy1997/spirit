@@ -41,20 +41,6 @@ type SingleChecker struct {
 	maxRetries       int
 	yieldTimeout     time.Duration
 	yieldsPerformed  atomic.Uint64 // number of yield/resume cycles performed
-
-	// Deferred re-read of mismatched chunks. The target legitimately lags the
-	// source, so a first-read mismatch is not evidence of anything until it
-	// has been looked at again -- see single_retry.go.
-	retryDelay          time.Duration
-	maxSrcChangedCycles int
-	pendingMu           sync.Mutex
-	pending             []*pendingChunk
-	lagResolved         atomic.Uint64 // mismatches that reconciled on re-read
-
-	// freshRead re-reads a chunk on a new snapshot. A field so tests can drive
-	// the adjudication without racing a real applier; production wiring sets
-	// it to freshReadChunk.
-	freshRead func(ctx context.Context, chunk *table.Chunk) (chunkRead, error)
 }
 
 var _ Checker = (*SingleChecker)(nil)
@@ -67,30 +53,55 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 	}
 	defer trxPool.Put(trx)
 	c.logger.Debug("checksumming chunk", "chunk", chunk.String())
-	// Compare BOTH the checksum and the row count. The row count is already
-	// returned by the query, so comparing it is free, and it closes a
-	// defense-in-depth gap: a row whose CRC32 is 0 contributes nothing to the
-	// BIT_XOR, so its absence is invisible to the checksum but visible to the
-	// count. A count mismatch is treated identically to a checksum mismatch.
-	read, err := readChunkIn(ctx, trx, chunk)
+	sourceChecksumCols, targetChecksumCols, err := chunk.ColumnMapping.ChecksumExprs()
 	if err != nil {
 		return err
 	}
-	if read.mismatched() {
-		// NOT a difference yet. This transaction's read view was created when
-		// the pass started, and the change feed applies to the target
-		// asynchronously, so a row written on the source and not yet applied
-		// reads as a mismatch while nothing is wrong. Defer it: the drain
-		// re-reads on a fresh snapshot once the pass has walked everything,
-		// and only what survives that is counted. See single_retry.go.
-		c.logger.Debug("chunk mismatched on first read; deferring for re-read",
-			"chunk", chunk.String(),
-			"sourceChecksum", read.srcCRC, "targetChecksum", read.tgtCRC,
-			"sourceCount", read.srcCount, "targetCount", read.tgtCount)
-		c.deferMismatch(chunk, read)
+	source := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
+		sourceChecksumCols,
+		chunk.Table.QuotedTableName,
+		chunk.String(),
+	)
+	target := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
+		targetChecksumCols,
+		chunk.NewTable.QuotedTableName,
+		chunk.String(),
+	)
+	var sourceChecksum, targetChecksum int64
+	var sourceCount, targetCount uint64
+	err = trx.QueryRowContext(ctx, source).Scan(&sourceChecksum, &sourceCount)
+	if err != nil {
+		return err
+	}
+	err = trx.QueryRowContext(ctx, target).Scan(&targetChecksum, &targetCount)
+	if err != nil {
+		return err
+	}
+	// Compare BOTH the checksum and the row count. The row count is already
+	// returned by the query above, so comparing it is free, and it closes a
+	// defense-in-depth gap: a row whose CRC32 is 0 contributes nothing to the
+	// BIT_XOR, so its absence is invisible to the checksum but visible to the
+	// count. A count mismatch is treated identically to a checksum mismatch.
+	if mismatch := compareChunk(sourceChecksum, targetChecksum, sourceCount, targetCount); mismatch.mismatched() {
+		// The source and target do not match, so we first need
+		// to inspect closely and report on the differences.
+		c.differencesFound.Add(1)
+		c.logger.Warn("chunk verification failed", "chunk", chunk.String(), "reason", mismatch.reason(sourceCount, targetCount), "sourceChecksum", sourceChecksum, "targetChecksum", targetChecksum, "sourceCount", sourceCount, "targetCount", targetCount)
+		if err := c.inspectDifferences(ctx, trx, chunk); err != nil {
+			return err
+		}
+		// Are we allowed to fix the differences? If not, return an error.
+		// This is mostly used by the test-suite.
+		if !c.fixDifferences {
+			return errors.New("checksum mismatch")
+		}
+		// Since we can fix differences, replace the chunk.
+		if err = c.replaceChunk(ctx, chunk); err != nil {
+			return err
+		}
 	}
 	// When we give feedback, we need to say how many rows were in the chunk.
-	c.chunker.Feedback(chunk, time.Since(startTime), read.tgtCount)
+	c.chunker.Feedback(chunk, time.Since(startTime), targetCount)
 	return nil
 }
 
@@ -369,11 +380,6 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 	// A previous Run may have left the checker poisoned (isInvalid=true from
 	// an errored attempt); every Run starts healthy.
 	c.setInvalid(false)
-	// It may also have left chunks deferred: the drain only empties the queue
-	// on a pass that completed, so a pass that errored out leaves its
-	// deferrals behind. Starting a Run on them would re-read chunks this Run
-	// never looked at, and judge this Run by them.
-	c.resetPending()
 
 	// Try the checksum up to n times if differences are found and we can fix them
 	var lastErr error
@@ -386,9 +392,6 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 			}
 			// Reset differences found counter
 			c.differencesFound.Store(0)
-			// Drop anything the failed attempt deferred, so this pass is judged
-			// on its own reads rather than inheriting a stale queue.
-			c.resetPending()
 			// Reset the invalid flag left set by the failed attempt: it makes
 			// isHealthy() false, which would skip every chunk and turn this
 			// retry into a vacuous pass.
@@ -556,21 +559,6 @@ func (c *SingleChecker) runChecksum(ctx context.Context) error {
 	if err1 != nil {
 		c.logger.Error("checksum failed")
 		return err1
-	}
-	// The walk has now seen every chunk. Anything that mismatched was
-	// DEFERRED rather than counted, because the target legitimately lags the
-	// source and a first read cannot tell apply lag from divergence. Re-read
-	// those on fresh snapshots and count only what survives.
-	//
-	// Deliberately after trxPool.Close(): the drain must not reuse this pass's
-	// read view, which was created when the pass started and therefore cannot
-	// show a target that has since caught up. See single_retry.go.
-	if deferred := c.pendingDepth(); deferred > 0 {
-		c.logger.Info("re-reading chunks that mismatched during the pass",
-			"deferred", deferred, "retryDelay", c.retryDelay)
-		if err := c.resolvePending(ctx); err != nil {
-			return err
-		}
 	}
 	return nil
 }
