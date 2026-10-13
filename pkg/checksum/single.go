@@ -37,10 +37,26 @@ type SingleChecker struct {
 	logger           *slog.Logger
 	fixDifferences   bool
 	differencesFound atomic.Uint64
-	recopyLock       sync.Mutex
-	maxRetries       int
-	yieldTimeout     time.Duration
-	yieldsPerformed  atomic.Uint64 // number of yield/resume cycles performed
+	// Repairs this pass made that a fresh re-read has NOT since confirmed.
+	//
+	// `differencesFound` answers "was this pass clean" and must stay as it is:
+	// a pass that repaired anything is not clean and still has to run again.
+	// This answers the narrower question `DumpCheckpoint` actually asks -- "may
+	// the persisted checksum watermark describe these chunks" -- whose rule is
+	// that a chunk must have been verified clean on a FRESH read. A recopied
+	// chunk that reads clean afterwards meets that rule; before this counter
+	// existed there was no way to say so, so any repair dropped the watermark
+	// to "" and every resume restarted the checksum at row one.
+	//
+	// Live cost of that: a 151M-row table whose every pass found a repair in
+	// its first thirty seconds, on a cluster that interrupts the run about
+	// every twenty hours while a pass takes ten. It re-verified the beginning
+	// of the table for a week and never reached the end.
+	unverifiedDifferences atomic.Uint64
+	recopyLock            sync.Mutex
+	maxRetries            int
+	yieldTimeout          time.Duration
+	yieldsPerformed       atomic.Uint64 // number of yield/resume cycles performed
 }
 
 var _ Checker = (*SingleChecker)(nil)
@@ -98,6 +114,28 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 		// Since we can fix differences, replace the chunk.
 		if err = c.replaceChunk(ctx, chunk); err != nil {
 			return err
+		}
+		// The recopy is written. Ask on a FRESH snapshot whether this chunk
+		// now reads clean, which is the exact test the persisted watermark
+		// requires of the chunks it describes. Confirmed means the watermark
+		// may cover it; anything else -- still different, or unreadable --
+		// leaves it unverified and the watermark conservative.
+		//
+		// This does NOT make the pass clean. `differencesFound` is already
+		// incremented above and is what decides that, so a repaired pass
+		// still runs again. All that changes is whether a RESUME has to
+		// start from row one.
+		verified, rereadErr := c.rereadChunkMatches(ctx, chunk)
+		if rereadErr != nil {
+			c.logger.Warn("could not re-read a recopied chunk; treating it as unverified",
+				"chunk", chunk.String(), "error", rereadErr)
+		}
+		// One condition, not two: rereadChunkMatches returns false with every
+		// error it reports, so "could not tell" already arrives here as "not
+		// verified". TestAnUnreadableRereadIsNotAPass pins that, because the
+		// simplification is only safe while it holds.
+		if !verified {
+			c.unverifiedDifferences.Add(1)
 		}
 	}
 	// When we give feedback, we need to say how many rows were in the chunk.
@@ -317,6 +355,56 @@ func (c *SingleChecker) ExecTime() time.Duration {
 // mismatch was detected in the most recent (or in-flight) pass. Used by
 // the continuous-checksum loop to decide whether a cancellation swallow
 // is safe.
+// UnverifiedDifferences reports repairs this pass has not re-confirmed.
+//
+// Read through an optional-interface assertion rather than added to Checker,
+// so the other checkers and every mock of them are untouched; a checker
+// without it falls back to DifferencesFound, which is the old behaviour.
+func (c *SingleChecker) UnverifiedDifferences() uint64 {
+	return c.unverifiedDifferences.Load()
+}
+
+// rereadChunkMatches re-compares one chunk on its OWN fresh snapshot.
+//
+// It must not borrow the pass's transaction. That read view was created when
+// the pass started, so it cannot see the recopy we just did and would call
+// every repair unverified -- the counter would never move and this would
+// ship doing nothing.
+//
+// A failure to tell is not a pass: the caller treats any error as unverified,
+// which keeps the watermark conservative.
+func (c *SingleChecker) rereadChunkMatches(ctx context.Context, chunk *table.Chunk) (bool, error) {
+	sourceChecksumCols, targetChecksumCols, err := chunk.ColumnMapping.ChecksumExprs()
+	if err != nil {
+		return false, err
+	}
+	trx, err := c.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		// Read-only, so a rollback is the whole cleanup -- and it must happen
+		// even on the happy path or each repaired chunk leaks an open
+		// REPEATABLE READ view holding a shared metadata lock on both tables,
+		// which the next pass then waits out at table-lock time.
+		_ = trx.Rollback()
+	}()
+	source := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
+		sourceChecksumCols, chunk.Table.QuotedTableName, chunk.String())
+	target := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
+		targetChecksumCols, chunk.NewTable.QuotedTableName, chunk.String())
+	var sourceChecksum, targetChecksum int64
+	var sourceCount, targetCount uint64
+	if err := trx.QueryRowContext(ctx, source).Scan(&sourceChecksum, &sourceCount); err != nil {
+		return false, err
+	}
+	if err := trx.QueryRowContext(ctx, target).Scan(&targetChecksum, &targetCount); err != nil {
+		return false, err
+	}
+	mismatch := compareChunk(sourceChecksum, targetChecksum, sourceCount, targetCount)
+	return !mismatch.mismatched(), nil
+}
+
 func (c *SingleChecker) DifferencesFound() uint64 {
 	return c.differencesFound.Load()
 }
@@ -392,6 +480,11 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 			}
 			// Reset differences found counter
 			c.differencesFound.Store(0)
+			// Reset with it: both describe THIS attempt, and a stale count
+			// here would keep the watermark pinned at "" for the rest of the
+			// run on the strength of a repair a previous attempt already
+			// re-verified.
+			c.unverifiedDifferences.Store(0)
 			// Reset the invalid flag left set by the failed attempt: it makes
 			// isHealthy() false, which would skip every chunk and turn this
 			// retry into a vacuous pass.

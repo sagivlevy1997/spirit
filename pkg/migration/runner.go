@@ -1524,6 +1524,28 @@ func (r *Runner) addsUniqueIndex() bool {
 	return false
 }
 
+// unverifiedRepairs reports how many chunks a checker has repaired and not
+// since re-confirmed, which is the question the persisted checksum watermark
+// turns on: it may only describe chunks verified clean on a fresh read.
+//
+// Asked through an optional interface so the Checker contract and every mock
+// of it stay as they are. A checker that cannot answer falls back to
+// DifferencesFound(), which is exactly the old rule -- any repair at all
+// drops the watermark -- so adding a checker can only be conservative.
+//
+// Why it matters: a pass that repaired one chunk used to persist no watermark
+// at all, so every resumed run restarted the checksum at row one. On a table
+// whose passes take ten hours, on a cluster that interrupts them every twenty,
+// the checksum never reached the end -- it re-verified the first few percent
+// for a week. A repaired chunk that re-reads clean has met the invariant's own
+// stated test and no longer has to cost the whole walk.
+func unverifiedRepairs(checker interface{ DifferencesFound() uint64 }) uint64 {
+	if u, ok := checker.(interface{ UnverifiedDifferences() uint64 }); ok {
+		return u.UnverifiedDifferences()
+	}
+	return checker.DifferencesFound()
+}
+
 // DumpCheckpoint is called approximately every minute.
 // It writes the current state of the migration to the checkpoint table,
 // which can be used in recovery. Previously resuming from checkpoint
@@ -1595,8 +1617,8 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		if wmErr != nil {
 			return status.ErrWatermarkNotReady
 		}
-		if r.checker != nil && r.checker.DifferencesFound() == 0 &&
-			(r.continuousChecker == nil || r.continuousChecker.DifferencesFound() == 0) {
+		if r.checker != nil && unverifiedRepairs(r.checker) == 0 &&
+			(r.continuousChecker == nil || unverifiedRepairs(r.continuousChecker) == 0) {
 			checksumWatermark = wm
 		}
 	}
