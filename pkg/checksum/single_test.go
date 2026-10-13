@@ -2,6 +2,7 @@ package checksum
 
 import (
 	"database/sql"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	mysql "github.com/go-sql-driver/mysql"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
@@ -602,4 +604,98 @@ func TestColumnBoundaryShift(t *testing.T) {
 	require.True(t, ok, "checker is not of type *SingleChecker")
 	err = singleChecker.runChecksum(t.Context())
 	require.ErrorContains(t, err, "checksum mismatch")
+}
+
+// TestARepairThatReReadsCleanIsCountedVerified is the point of the
+// UnverifiedDifferences counter.
+//
+// DumpCheckpoint may only persist a checksum watermark describing chunks
+// verified clean on a FRESH read, and it used to enforce that by throwing the
+// watermark away whenever a pass repaired anything. Nothing ever asked the
+// repaired chunk whether it was clean afterwards, so every resumed run
+// restarted the checksum at row one -- which on a ten-hour pass, interrupted
+// every twenty hours, means it never reaches the end of the table.
+//
+// So: the pass must still be unclean (DifferencesFound > 0, it runs again),
+// while the repair itself is confirmed (UnverifiedDifferences == 0, the
+// watermark may cover it).
+func TestARepairThatReReadsCleanIsCountedVerified(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS reverifyt1, _reverifyt1_new, _reverifyt1_chkpnt")
+	testutils.RunSQL(t, "CREATE TABLE reverifyt1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE _reverifyt1_new (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE _reverifyt1_chkpnt (a INT)") // for binlog advancement
+	testutils.RunSQL(t, "INSERT INTO reverifyt1 VALUES (1, 2, 3), (2, 2, 3), (3, 2, 3)")
+	// The copy is missing a row and has a wrong one: both shapes of mismatch
+	// the chunk comparison can report (count, and checksum).
+	testutils.RunSQL(t, "INSERT INTO _reverifyt1_new VALUES (1, 2, 3), (2, 9, 9)")
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := table.NewTableInfo(db, "test", "reverifyt1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "_reverifyt1_new")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+	require.NoError(t, chunker.Open())
+
+	config := NewCheckerDefaultConfig()
+	config.FixDifferences = true
+	config.MaxRetries = 2
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
+	require.NoError(t, err)
+	singleChecker, ok := checker.(*SingleChecker)
+	require.True(t, ok)
+
+	// ONE attempt, not Run(): Run's retry loop zeroes both counters before
+	// the next attempt, so a successful Run ends up reporting the clean final
+	// attempt and there is nothing left to assert about the repair.
+	require.NoError(t, singleChecker.runChecksum(t.Context()))
+
+	assert.Positive(t, singleChecker.DifferencesFound(),
+		"the repair was not counted, so this test is not exercising the repair path at all")
+	assert.Equal(t, uint64(0), singleChecker.UnverifiedDifferences(),
+		"a repair that re-reads clean was still counted unverified, so DumpCheckpoint throws the "+
+			"watermark away and every resume restarts the checksum at row one")
+}
+
+// TestAnUnreadableRereadIsNotAPass pins the contract the caller leans on: a
+// re-read that cannot be performed reports NOT-verified, so failing to tell
+// keeps the persisted watermark conservative rather than waving a repair
+// through. The caller tests only `!verified` on the strength of this.
+func TestAnUnreadableRereadIsNotAPass(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS unreadablet1, _unreadablet1_new")
+	testutils.RunSQL(t, "CREATE TABLE unreadablet1 (a INT NOT NULL, b INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE _unreadablet1_new (a INT NOT NULL, b INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "INSERT INTO unreadablet1 VALUES (1, 1), (2, 2)")
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+
+	t1 := table.NewTableInfo(db, "test", "unreadablet1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "_unreadablet1_new")
+	require.NoError(t, t2.SetInfo(t.Context()))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
+	chunk, err := chunker.Next()
+	require.NoError(t, err)
+
+	checker := &SingleChecker{db: db, logger: slog.Default()}
+	require.NoError(t, db.Close()) // nothing can be read through this now
+
+	verified, err := checker.rereadChunkMatches(t.Context(), chunk)
+	require.Error(t, err, "a closed database should not be readable")
+	assert.False(t, verified,
+		"an unreadable re-read reported VERIFIED, which would persist a watermark over a chunk nobody checked")
 }
