@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -302,15 +303,21 @@ func TestNewDatumFromValue(t *testing.T) {
 
 	// Test empty binary values - must NOT serialize as "0x" because
 	// MySQL parses that as an identifier, not a hex literal.
+	//
+	// That premise is correct and the conclusion drawn from it was not: the
+	// EMPTY cases below expected "0x00", which is one NUL byte rather than
+	// zero bytes, and this is where the copier corruption was written down as
+	// correct behaviour. X'' is the empty binary literal MySQL actually
+	// accepts. The NUL-byte case above is unchanged -- it was always right.
 	d, err = NewDatumFromValue([]byte{0x00}, "MEDIUMBLOB")
 	require.NoError(t, err)
 	require.Equal(t, "0x00", d.String())
 	d, err = NewDatumFromValue([]byte{}, "VARBINARY(255)")
 	require.NoError(t, err)
-	require.Equal(t, "0x00", d.String())
+	require.Equal(t, "X''", d.String())
 	d, err = NewDatumFromValue("", "BLOB")
 	require.NoError(t, err)
-	require.Equal(t, "0x00", d.String())
+	require.Equal(t, "X''", d.String())
 	d, err = NewDatumFromValue(nil, "BLOB")
 	require.NoError(t, err)
 	require.Equal(t, "NULL", d.String())
@@ -473,4 +480,65 @@ func TestDatumCompareTypeMismatch(t *testing.T) {
 	gt, err := goodSigned.GreaterThan(Datum{Val: int64(0), Tp: signedType})
 	require.NoError(t, err)
 	require.True(t, gt)
+}
+
+// TestAnEmptyBinaryValueIsNotOneNulByte is the whole point of this change.
+//
+// Datum.String() rendered an empty binary value as the SQL literal "0x00",
+// with the comment "MySQL binary string needs at least one character". The
+// comment's premise is true -- `SELECT 0x` is `ERROR 1054 Unknown column
+// '0x'`, because MySQL parses a bare 0x as an identifier -- but 0x00 is not
+// the empty value it was standing in for. It is one NUL byte.
+//
+// The buffered copier reads rows into Go and writes them back through this
+// function, so every empty BLOB in a copied table arrived in the shadow table
+// one byte long. On wix_quotes.quote_view that was 1:1 and deterministic,
+// 19-52% of rows across the two ranges measured, and it cost three migrations
+// and about 65 hours of copying to find -- the checksum's own repair is
+// server-side, so it overwrote the evidence with correct data every time
+// anyone sampled it. The workaround was a per-migration --unbuffered flag
+// that opts into the legacy copier.
+//
+// X” is the fix rather than ”: both store zero bytes (verified against
+// MySQL 8.0.45), but X” is unambiguously a binary string literal, which
+// keeps the invariant forceHexEncode exists to protect -- a binary datum
+// never serializes as a character literal.
+func TestAnEmptyBinaryValueIsNotOneNulByte(t *testing.T) {
+	empty, err := NewDatumFromValue("", "varbinary(16)")
+	require.NoError(t, err)
+
+	rendered := empty.String()
+
+	assert.NotEqual(t, "0x00", rendered,
+		"an empty binary value still renders as one NUL byte, which is the copier corruption")
+	assert.Equal(t, "X''", rendered)
+}
+
+// TestANulByteIsStillANulByte -- the other side. A value that genuinely IS
+// one NUL byte must keep rendering as one, or the fix trades a corruption for
+// its mirror image.
+func TestANulByteIsStillANulByte(t *testing.T) {
+	nul, err := NewDatumFromValue("\x00", "varbinary(16)")
+	require.NoError(t, err)
+
+	assert.Equal(t, "0x00", nul.String(),
+		"a real NUL byte no longer renders as 0x00, so the fix lost a byte instead of inventing one")
+}
+
+// TestANonEmptyBinaryValueIsUnaffected guards the ordinary path, which is the
+// one every migration takes.
+func TestANonEmptyBinaryValueIsUnaffected(t *testing.T) {
+	d, err := NewDatumFromValue("abc", "varbinary(16)")
+	require.NoError(t, err)
+
+	assert.Equal(t, "0x616263", d.String())
+}
+
+// TestAnEmptyStringColumnIsNotAffected -- only BINARY-ish types take the hex
+// path. An empty VARCHAR must still be the empty string literal, not X”.
+func TestAnEmptyStringColumnIsNotAffected(t *testing.T) {
+	d, err := NewDatumFromValue("", "varchar(16)")
+	require.NoError(t, err)
+
+	assert.Equal(t, `""`, d.String())
 }
