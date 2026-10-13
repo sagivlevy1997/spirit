@@ -143,7 +143,16 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 		{1, "Alice", 100, []byte{0x00}},
 		{2, "Bob", 200, nil},
 		{3, "Charlie", 300, []byte{0x62, 0x72, 0x6F, 0x77, 0x6E}},
-		{4, "Dan", 400, []byte{0x00}},
+		// Row 4's source value is []byte{} -- EMPTY -- and this read
+		// []byte{0x00}, the same expectation as row 1, whose source value is
+		// a real NUL byte. Two different inputs, one expected output: the
+		// test encoded Datum.String()'s "0x00" substitution as correct
+		// behaviour, which is why the corruption survived review and cost
+		// three migrations to find in production.
+		//
+		// An empty blob stays empty now. Row 1 is unchanged, which is the
+		// half that matters for the fix not having gone too far.
+		{4, "Dan", 400, []byte{}},
 	}
 
 	i := 0

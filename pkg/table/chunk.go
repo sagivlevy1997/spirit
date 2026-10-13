@@ -127,7 +127,21 @@ func jsonQuoteDatum(v Datum) string {
 			bs = fmt.Sprintf("%v", v.Val)
 		}
 		if len(bs) == 0 {
-			s = "0x00" // MySQL binary string needs at least one character
+			// "0x", not "0x00", and not Datum.String()'s X'' either.
+			//
+			// This string is never SQL -- it goes into the checkpoint's JSON
+			// and comes back through datumValFromString, which hex-decodes
+			// anything with a 0x prefix. hex.DecodeString("") returns an
+			// empty slice and no error, so "0x" round-trips to the empty
+			// string exactly, while X'' would not be recognised as hex and
+			// would come back as the literal three characters.
+			//
+			// The old "0x00" had the same origin as the one in Datum.String
+			// (same copy-pasted comment) and a different consequence: a
+			// boundary is the checkpoint WATERMARK, so an empty binary key
+			// was persisted as a one-NUL-byte key and a resume restarted
+			// from a boundary the copier never stopped at.
+			s = "0x"
 		} else {
 			s = fmt.Sprintf("%#x", bs)
 		}

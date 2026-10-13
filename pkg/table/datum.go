@@ -351,9 +351,29 @@ func (d Datum) String() string {
 		s = fmt.Sprintf("%v", d.Val)
 	}
 	if d.IsBinaryString() {
-		// MySQL binary string needs at least one character
 		if len(s) == 0 {
-			return "0x00"
+			// X'', NOT 0x00. The premise of the old comment here -- "MySQL
+			// binary string needs at least one character" -- is true of the
+			// 0x form: `SELECT 0x` is ERROR 1054 Unknown column '0x',
+			// because a bare 0x parses as an identifier. But 0x00 is not the
+			// empty value it was standing in for, it is ONE NUL BYTE, and
+			// the buffered copier reads rows into Go and writes them back
+			// through here.
+			//
+			// So every empty BLOB in a copied table arrived in the shadow
+			// table one byte long. On wix_quotes.quote_view that was 1:1 and
+			// deterministic, 19-52% of rows across the two ranges measured,
+			// and it took three migrations and ~65 hours of copying to find:
+			// the checksum's own repair is server-side, so it overwrote the
+			// evidence with correct data every time anyone sampled it. The
+			// workaround was a per-migration --unbuffered flag opting into
+			// the legacy copier for affected tables.
+			//
+			// X'' over '': both store zero bytes (checked against MySQL
+			// 8.0.45), but X'' is unambiguously a binary string literal,
+			// which keeps the invariant `forceHexEncode` exists to protect --
+			// a binary datum never serializes as a character literal.
+			return "X''"
 		}
 		return fmt.Sprintf("%#x", s)
 	}

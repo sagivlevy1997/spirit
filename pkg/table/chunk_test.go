@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -330,4 +331,51 @@ func TestWatermarkPerTable(t *testing.T) {
 	require.ErrorContains(t, err, "single-table format")
 	_, err = WatermarkPerTable("not-json", t1, t2)
 	require.Error(t, err)
+}
+
+// TestAnEmptyBinaryBoundaryRoundTrips is the checkpoint half of the same bug.
+//
+// jsonQuoteDatum carried its own copy of the "0x00" substitution, with the
+// same copy-pasted comment, and it is NOT reached through Datum.String() --
+// the comment above it says so explicitly, because a boundary has to be
+// JSON-escaped rather than SQL-escaped.
+//
+// Here the consequence is different and arguably worse: the checkpoint
+// watermark is a chunk BOUNDARY, so an empty binary key was persisted as a
+// one-NUL-byte key. A resume then restarts from a boundary that is not the
+// one the copier stopped at, silently.
+//
+// The fix is "0x" rather than X”: this string is never SQL, and
+// datumValFromString hex-decodes anything with a 0x prefix --
+// hex.DecodeString("") returns an empty slice and no error, so "0x"
+// round-trips to the empty string exactly.
+func TestAnEmptyBinaryBoundaryRoundTrips(t *testing.T) {
+	empty, err := NewDatumFromValue("", "varbinary(16)")
+	require.NoError(t, err)
+
+	boundary := &Boundary{Value: []Datum{empty}, Inclusive: true}
+	encoded := boundary.valuesString()
+
+	assert.NotEqual(t, `"0x00"`, encoded,
+		"an empty binary boundary is still persisted as one NUL byte, so a resume restarts from "+
+			"a boundary the copier never stopped at")
+
+	decoded, err := datumValFromString("0x", binaryType)
+	require.NoError(t, err)
+	assert.Equal(t, "", decoded, `"0x" must decode back to the empty string`)
+}
+
+// TestANulByteBoundaryStillRoundTrips -- the mirror image. A boundary that
+// really is one NUL byte must survive unchanged, or the fix swaps one
+// silently-wrong watermark for another.
+func TestANulByteBoundaryStillRoundTrips(t *testing.T) {
+	nul, err := NewDatumFromValue("\x00", "varbinary(16)")
+	require.NoError(t, err)
+
+	boundary := &Boundary{Value: []Datum{nul}, Inclusive: true}
+	assert.Contains(t, boundary.valuesString(), "0x00")
+
+	decoded, err := datumValFromString("0x00", binaryType)
+	require.NoError(t, err)
+	assert.Equal(t, "\x00", decoded)
 }
