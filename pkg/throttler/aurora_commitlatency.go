@@ -38,7 +38,8 @@ const (
 )
 
 // commitLatencyPollInterval controls how often the background loop samples
-// commit metrics. Matches the replica throttler's 5s loopInterval — over a
+// commit metrics. 5s, as the replica throttler's loopInterval was upstream
+// (it is 1s here, for tight lag budgets) — over a
 // 5s window an Aurora cluster sees plenty of commits, so the single Δ is a
 // large enough sample that a multi-sample rolling buffer isn't worth the
 // added complexity. Var (not const) so tests can shorten it.

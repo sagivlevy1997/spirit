@@ -46,7 +46,26 @@ func TestSettings(t *testing.T) {
 	require.Error(t, err)
 
 	r.TargetChunkTime = time.Second * 4
-	r.ReplicaMaxLag = time.Second * 5
+	r.ReplicaMaxLag = time.Hour*4 + time.Second
 	err = settingsCheck(t.Context(), r, slog.Default())
 	require.Error(t, err)
+}
+
+// gh-ost throttles at 3s of replica lag (--max-lag-millis=3000), and Spirit
+// running beside it on the same clusters has to be able to hold the same
+// line. The floor used to be 10s, so a 3s limit died at launch.
+func TestSettingsReplicaMaxLagFloor(t *testing.T) {
+	r := Resources{
+		Table:           &table.TableInfo{TableName: "test", SchemaName: "test"},
+		Threads:         2,
+		TargetChunkTime: time.Second,
+	}
+
+	for _, lag := range []time.Duration{time.Second, 3 * time.Second, 5 * time.Second} {
+		r.ReplicaMaxLag = lag
+		require.NoError(t, settingsCheck(t.Context(), r, slog.Default()), "replica-max-lag=%s", lag)
+	}
+
+	r.ReplicaMaxLag = 999 * time.Millisecond
+	require.ErrorContains(t, settingsCheck(t.Context(), r, slog.Default()), "1s-4hr")
 }

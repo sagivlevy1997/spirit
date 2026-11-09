@@ -111,3 +111,10 @@ func TestReplica_UpdateLagWrapsCause(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled, "UpdateLag must wrap the underlying cause, not replace it")
 	require.ErrorContains(t, err, "could not check replication lag")
 }
+
+// The smallest lag budget the engine accepts is 1s (see the settings check).
+// A budget is only as tight as the poll that measures it: checked every 5s, a
+// 3s limit can be overrun by 5s before the copy is held back.
+func TestReplica_LagIsPolledAtLeastOnceASecond(t *testing.T) {
+	require.LessOrEqual(t, loopInterval, time.Second)
+}

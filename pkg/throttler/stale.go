@@ -34,9 +34,10 @@ import (
 //     IsThrottled() reports true, pausing the copy until polling recovers.
 const (
 	// staleSignalThreshold is how old the last successful sample may be
-	// before the cached value is no longer trusted. Three poll intervals
-	// (commitLatencyPollInterval, threadsRunningPollInterval and the replica
-	// throttler's loopInterval are all 5s): one or two failed or slow polls —
+	// before the cached value is no longer trusted. Three poll intervals of
+	// the Aurora throttlers (commitLatencyPollInterval and
+	// threadsRunningPollInterval are 5s; the replica throttler's loopInterval
+	// is 1s, so it gets fifteen): one or two failed or slow polls —
 	// a brief failover blip, one stalled status query — don't flap the guard,
 	// but the signal is declared stale before the autoscaler can take more
 	// than one blind step, since its increases are spaced

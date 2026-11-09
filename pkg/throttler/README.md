@@ -77,7 +77,7 @@ throttler, err := throttler.NewReplicationThrottler(
 - Uses `performance_schema` for accurate lag calculation
 - Monitors both applier latency and queue latency
 - Automatically detects idle replicas to avoid false positives
-- Checks lag every 5 seconds by default
+- Checks lag every second, so budgets down to 1s are measured
 - Blocks copy operations when lag exceeds tolerance (default: up to 60 seconds per check)
 - **Fails closed** when lag becomes unobservable: if lag polling keeps failing (e.g. the replica is unreachable) for more than 15 seconds, copying pauses until polling recovers, rather than proceeding at full speed against a lag budget nobody is measuring. Remove the replica DSN to proceed without lag protection.
 
