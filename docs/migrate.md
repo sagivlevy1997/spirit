@@ -283,7 +283,7 @@ For comprehensive examples of replica TLS behavior, including all possible combi
 
 - Type: Duration
 - Default value: `120s`
-- Range: `10s-1hr`
+- Range: `1s-4hr`
 
 Used in combination with [replica-dsn](#replica-dsn). This is the maximum lag that the replica is allowed to have before Spirit will throttle the copy phase to ensure that the replica does not fall too far behind. Spirit **does not support read-replicas** and throttling is only intended to ensure that replicas do not fall so far behind that disaster recovery will be affected. If you require a high fidelity for replicas, you should consider using `gh-ost` instead of Spirit.
 

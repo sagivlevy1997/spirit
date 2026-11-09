@@ -24,9 +24,11 @@ func settingsCheck(ctx context.Context, r Resources, logger *slog.Logger) error 
 	if r.TargetChunkTime < 100*time.Millisecond || r.TargetChunkTime > 5*time.Second {
 		return errors.New("--target-chunk-time must be in the range of 100ms-5s")
 	}
-	// ReplicaMaxLag must be in the range of 10s-4hr
-	if r.ReplicaMaxLag < 10*time.Second || r.ReplicaMaxLag > time.Hour*4 {
-		return errors.New("--replica-max-lag must be in the range of 10s-4hr")
+	// ReplicaMaxLag must be in the range of 1s-4hr. The floor was 10s
+	// upstream; it is 1s here so a cluster can hold the same 3s line gh-ost
+	// does. The replica throttler polls lag once a second to match.
+	if r.ReplicaMaxLag < time.Second || r.ReplicaMaxLag > time.Hour*4 {
+		return errors.New("--replica-max-lag must be in the range of 1s-4hr")
 	}
 	return nil
 }

@@ -11,7 +11,10 @@ import (
 
 var (
 	blockWaitInterval = 1 * time.Second
-	loopInterval      = 5 * time.Second
+	// loopInterval is how often replica lag is read. 1s, not upstream's 5s:
+	// the smallest --replica-max-lag is 1s, and a budget polled less often
+	// than its own size is overrun before anything sees it.
+	loopInterval = 1 * time.Second
 )
 
 // Replica throttles on replication lag, pausing the copy while the observed
@@ -68,8 +71,8 @@ var _ Throttler = &Replica{}
 // Open starts the lag monitor. This is not gh-ost. The lag monitor is primitive
 // because the requirement is only for DR, and not for up-to-date read-replicas.
 // Because chunk-sizes are typically 500ms, getting fine-grained metrics is not realistic.
-// We only check the replica every 5 seconds, and typically allow up to 120s
-// of replica lag, which is a lot.
+// We check the replica every second (see loopInterval), so a budget as tight
+// as gh-ost's 3s is measured, not guessed at.
 func (l *Replica) Open(ctx context.Context) error {
 	if err := l.UpdateLag(ctx); err != nil {
 		return err
