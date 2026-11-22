@@ -57,6 +57,9 @@ type Runner struct {
 	db        *sql.DB
 	dbConfig  *dbconn.DBConfig
 	replicas  []*sql.DB
+	// replicaHosts is host:port of each entry in replicas, same order, for
+	// naming a replica in logs without its DSN (which carries a password).
+	replicaHosts []string
 	// monitorDB is a small dedicated connection pool used by the Aurora
 	// throttlers to poll perf-schema / global-status. Sharing the main
 	// r.db pool let throttler polls queue behind chunk writes, which
@@ -545,6 +548,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 		if err := check.RunChecks(ctx, check.Resources{
 			DB:              r.db,
 			Replicas:        r.replicas,
+			ReplicaHosts:    r.replicaHosts,
 			Table:           change.table,
 			Statement:       change.stmt,
 			TargetChunkTime: r.migration.TargetChunkTime,
@@ -883,6 +887,7 @@ func (r *Runner) closeReplicas() error {
 		}
 	}
 	r.replicas = nil
+	r.replicaHosts = nil
 	return errors.Join(errs...)
 }
 
@@ -1001,14 +1006,26 @@ func (r *Runner) buildReplicaThrottlers() ([]throttler.Throttler, error) {
 			enhancedDSN = dsn
 		}
 
+		// A replica that cannot be reached now is not fatal: it gets a lazy
+		// handle and its throttler starts it set aside (one warning naming
+		// it), then keeps polling so it can recover. Only a DSN that cannot
+		// even be parsed still fails -- that is a configuration bug, not
+		// replica state.
+		host := dbconn.HostOfDSN(dsn)
+		enhancedDSN = dbconn.WithDialTimeout(enhancedDSN, throttler.ReplicaQueryTimeout)
 		replicaDB, err := dbconn.NewWithConnectionType(enhancedDSN, replicaDBConfig, "replica database")
 		if err != nil {
-			_ = r.closeReplicas()
-			return nil, fmt.Errorf("failed to connect to replica database (DSN: %s): %w", dbconn.RedactDSN(dsn), err)
+			r.logger.Debug("replica not reachable at startup; opening it lazily", "host", host, "error", err)
+			replicaDB, err = dbconn.NewLazyWithConnectionType(enhancedDSN, replicaDBConfig, "replica database")
+			if err != nil {
+				_ = r.closeReplicas()
+				return nil, fmt.Errorf("invalid replica DSN (DSN: %s): %w", dbconn.RedactDSN(dsn), err)
+			}
 		}
 		r.replicas = append(r.replicas, replicaDB)
+		r.replicaHosts = append(r.replicaHosts, host)
 
-		replicaThrottler, err := throttler.NewReplicationThrottler(replicaDB, r.migration.ReplicaMaxLag, r.logger)
+		replicaThrottler, err := throttler.NewReplicationThrottlerForHost(replicaDB, host, r.migration.ReplicaMaxLag, r.logger)
 		if err != nil {
 			_ = r.closeReplicas()
 			return nil, fmt.Errorf("could not create replication throttler (DSN: %s): %w", dbconn.RedactDSN(dsn), err)

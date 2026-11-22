@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -202,4 +203,35 @@ func TestValidCertificateBundle(t *testing.T) {
 
 	// ensure that at least one certificate was parsed
 	require.True(t, foundCertificates, "No certificates found in bundle")
+}
+
+// The lazy constructor must not dial: a replica unreachable at startup is
+// set aside, not fatal, and keeps a handle so it can recover later.
+func TestNewLazyWithConnectionType_DoesNotPing(t *testing.T) {
+	db, err := NewLazyWithConnectionType("u:p@tcp(127.0.0.1:1)/test", NewDBConfig(), "replica database")
+	require.NoError(t, err)
+	require.NotNil(t, db)
+	require.NoError(t, db.Close())
+}
+
+func TestHostOfDSN(t *testing.T) {
+	require.Equal(t, "db-x.example.net:3306", HostOfDSN("u:p@tcp(db-x.example.net:3306)/test"))
+	require.Equal(t, "", HostOfDSN("::not a dsn"))
+}
+
+// A replica DSN gets a dial timeout unless it already has one, so a
+// black-holed replica cannot hold the startup ping for the OS TCP timeout.
+func TestWithDialTimeout(t *testing.T) {
+	out := WithDialTimeout("u:p@tcp(db-x:3306)/test", 5*time.Second)
+	cfg, err := mysql.ParseDSN(out)
+	require.NoError(t, err)
+	require.Equal(t, 5*time.Second, cfg.Timeout)
+	require.Equal(t, "u", cfg.User)
+	require.Equal(t, "p", cfg.Passwd)
+
+	kept, err := mysql.ParseDSN(WithDialTimeout("u:p@tcp(db-x:3306)/test?timeout=2s", 5*time.Second))
+	require.NoError(t, err)
+	require.Equal(t, 2*time.Second, kept.Timeout)
+
+	require.Equal(t, "::not a dsn", WithDialTimeout("::not a dsn", 5*time.Second))
 }

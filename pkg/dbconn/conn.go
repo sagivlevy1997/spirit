@@ -660,6 +660,55 @@ func SplitDSNs(dsnList string) []string {
 	return dsns
 }
 
+// NewLazyWithConnectionType builds the same DSN and pool settings as
+// NewWithConnectionType but does not ping, so it succeeds for a host that is
+// down right now. It is for replicas only: one unreachable at startup is set
+// aside rather than failing the run, and keeps this handle so it can recover.
+// The only error is a DSN that cannot be built at all.
+func NewLazyWithConnectionType(inputDSN string, config *DBConfig, connectionType string) (*sql.DB, error) {
+	if config != nil {
+		configNorm := *config
+		configNorm.TLSMode = strings.ToUpper(config.TLSMode)
+		config = &configNorm
+	}
+	dsn, err := newDSN(inputDSN, config)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s connection: %w", connectionType, err)
+	}
+	db.SetMaxOpenConns(config.MaxOpenConnections)
+	db.SetConnMaxLifetime(maxConnLifetime)
+	db.SetMaxIdleConns(maxIdleConns)
+	return db, nil
+}
+
+// WithDialTimeout returns dsn with a dial timeout of d unless it already
+// sets one. For replicas: without it, a black-holed host (no RST) holds the
+// startup ping and every redial for the OS TCP timeout. A DSN that cannot be
+// parsed is returned unchanged for the caller's own error path.
+func WithDialTimeout(dsn string, d time.Duration) string {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil || cfg.Timeout > 0 {
+		return dsn
+	}
+	cfg.Timeout = d
+	return cfg.FormatDSN()
+}
+
+// HostOfDSN returns the host:port a DSN points at, or "" if it cannot be
+// parsed. Use it to name a connection in logs: never log the DSN, it carries
+// the password.
+func HostOfDSN(dsn string) string {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return ""
+	}
+	return cfg.Addr
+}
+
 // RedactDSN returns dsn with the password masked, safe for logging. It keeps
 // the username, host and parameters so logs stay useful, masking only the
 // password and only when one was actually present. If the driver can't parse

@@ -1,6 +1,7 @@
 package check
 
 import (
+	"bytes"
 	"database/sql"
 	"log/slog"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/throttler"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,8 +28,7 @@ func TestReplicaHealth(t *testing.T) {
 	require.NoError(t, err)
 	r.Replicas = []*sql.DB{nonReplica}
 	err = replicaHealth(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrReplicaNotHealthy)
+	require.NoError(t, err) // set aside with a warning, never fatal
 
 	// use an actual replica
 	replicaDSN := os.Getenv("REPLICA_DSN")
@@ -46,5 +47,24 @@ func TestReplicaHealth(t *testing.T) {
 	require.NoError(t, err)
 	r.Replicas = []*sql.DB{invalidDB}
 	err = replicaHealth(t.Context(), r, slog.Default())
-	require.Error(t, err) // invalid
+	require.NoError(t, err) // set aside with a warning, never fatal
+}
+
+// A broken replica never stops the run at PostSetup or at cutover: it is
+// named in one warning and skipped. Needs no MySQL.
+func TestReplicaHealth_NeverBlocks(t *testing.T) {
+	db, err := sql.Open("mysql", "u:p@tcp(127.0.0.1:1)/test?timeout=200ms")
+	require.NoError(t, err)
+	defer db.Close()
+	var logs bytes.Buffer
+	r := Resources{Replicas: []*sql.DB{db}, ReplicaHosts: []string{"db-x:3306"}}
+	err = replicaHealth(t.Context(), r, slog.New(slog.NewTextHandler(&logs, nil)))
+	require.NoError(t, err)
+	// A check names the replica but does not set it aside: the throttler is
+	// the only source of set-aside state, so a blip at a check cannot leave a
+	// healthy replica marked set aside for the rest of the engine's life.
+	require.Contains(t, logs.String(), ReplicaIgnoredByCheckMsg)
+	require.NotContains(t, logs.String(), throttler.ReplicaSetAsideMsg)
+	require.Contains(t, logs.String(), "host=db-x:3306")
+	require.NotContains(t, logs.String(), "u:p@")
 }

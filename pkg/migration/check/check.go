@@ -27,8 +27,11 @@ const (
 )
 
 type Resources struct {
-	DB                   *sql.DB
-	Replicas             []*sql.DB
+	DB       *sql.DB
+	Replicas []*sql.DB
+	// ReplicaHosts is host:port of each entry in Replicas, same order, for
+	// naming a replica in warnings. May be shorter (or nil) in tests.
+	ReplicaHosts         []string
 	Table                *table.TableInfo
 	Statement            *statement.AbstractStatement
 	TargetChunkTime      time.Duration
