@@ -2,93 +2,50 @@ package check
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
 
-	"github.com/block/spirit/pkg/utils"
+	"github.com/block/spirit/pkg/throttler"
 )
 
-// ErrReplicaNotHealthy is returned when a replica's IO or SQL thread is not running.
+// ErrReplicaNotHealthy was returned when a replica's IO or SQL thread was not
+// running. The check no longer fails on replica state (see replicaHealth);
+// the error stays exported for callers that still match on it.
 var ErrReplicaNotHealthy = fmt.Errorf("replica is not healthy")
 
 func init() {
 	registerCheck("replicahealth", replicaHealth, ScopePostSetup|ScopeCutover)
 }
 
-// replicaHealth checks SHOW REPLICA STATUS for Yes and Yes on all replicas.
-// It should be run at various stages of the migration if replicas are present.
+// replicaHealth reports every replica whose replication is not running, or
+// that cannot be asked, with one throttler.ReplicaSetAsideMsg warning naming
+// it -- and never returns an error for it.
+//
+// It used to return the first broken replica's error, which made the engine
+// exit at PostSetup or, worse, at cutover after hours of copying: one Wix run
+// died on a stopped SQL thread, another on a replica deleted while it waited
+// at the sentinel. Replica state is the operator's information; the cutover
+// on the primary does not depend on it, and the lag throttler already sets a
+// broken replica aside.
 func replicaHealth(ctx context.Context, r Resources, logger *slog.Logger) error {
-	if len(r.Replicas) == 0 {
-		return nil // The user is not using the replica DSN feature.
-	}
-	for _, replica := range r.Replicas {
-		rows, err := replica.QueryContext(ctx, "SHOW REPLICA STATUS")
+	for i, replica := range r.Replicas {
+		running, why, err := throttler.ReplicationRunning(ctx, replica)
 		if err != nil {
-			return err
+			why = err.Error()
 		}
-		status, err := scanToMap(rows)
-		utils.CloseAndLog(rows)
-		if err != nil {
-			return err
-		}
-		if status == nil {
-			host := replicaHost(ctx, replica)
-			return fmt.Errorf("%w: SHOW REPLICA STATUS returned no rows on %s (not a replica?)", ErrReplicaNotHealthy, host)
-		}
-
-		ioRunning := status["Replica_IO_Running"].String
-		sqlRunning := status["Replica_SQL_Running"].String
-
-		if ioRunning != "Yes" {
-			ioState := status["Replica_IO_State"].String
-			host := replicaHost(ctx, replica)
-			return fmt.Errorf("%w: IO thread not running on %s (Replica_IO_State: %s)", ErrReplicaNotHealthy, host, ioState)
-		}
-		if sqlRunning != "Yes" {
-			sqlState := status["Replica_SQL_Running_State"].String
-			host := replicaHost(ctx, replica)
-			return fmt.Errorf("%w: SQL thread not running on %s (Replica_SQL_Running_State: %s)", ErrReplicaNotHealthy, host, sqlState)
+		if err != nil || !running {
+			logger.Warn(throttler.ReplicaSetAsideMsg, "host", replicaHostAt(r, i), "reason", why)
 		}
 	}
 	return nil
 }
 
-// replicaHost attempts to identify the replica by querying @@hostname and @@port.
-// Falls back to "unknown" if the query fails.
-func replicaHost(ctx context.Context, db *sql.DB) string {
-	var hostname string
-	var port int
-	if err := db.QueryRowContext(ctx, "SELECT @@hostname, @@port").Scan(&hostname, &port); err != nil {
-		return "unknown"
+// replicaHostAt names replica i by host:port, or "unknown" when the caller
+// supplied no host list. Never queries the replica: the hosts that need
+// naming are exactly the ones that cannot answer.
+func replicaHostAt(r Resources, i int) string {
+	if i < len(r.ReplicaHosts) && r.ReplicaHosts[i] != "" {
+		return r.ReplicaHosts[i]
 	}
-	return fmt.Sprintf("%s:%d", hostname, port)
-}
-
-func scanToMap(rows *sql.Rows) (map[string]sql.NullString, error) {
-	columns, err := rows.Columns()
-	if err != nil {
-		return nil, err
-	}
-	if !rows.Next() {
-		err = rows.Err()
-		if err != nil {
-			return nil, err
-		} else {
-			return nil, nil
-		}
-	}
-	values := make([]any, len(columns))
-	for index := range values {
-		values[index] = new(sql.NullString)
-	}
-	err = rows.Scan(values...)
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[string]sql.NullString)
-	for index, columnName := range columns {
-		result[columnName] = *values[index].(*sql.NullString)
-	}
-	return result, nil
+	return "unknown"
 }

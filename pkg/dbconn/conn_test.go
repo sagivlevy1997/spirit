@@ -203,3 +203,17 @@ func TestValidCertificateBundle(t *testing.T) {
 	// ensure that at least one certificate was parsed
 	require.True(t, foundCertificates, "No certificates found in bundle")
 }
+
+// The lazy constructor must not dial: a replica unreachable at startup is
+// set aside, not fatal, and keeps a handle so it can recover later.
+func TestNewLazyWithConnectionType_DoesNotPing(t *testing.T) {
+	db, err := NewLazyWithConnectionType("u:p@tcp(127.0.0.1:1)/test", NewDBConfig(), "replica database")
+	require.NoError(t, err)
+	require.NotNil(t, db)
+	require.NoError(t, db.Close())
+}
+
+func TestHostOfDSN(t *testing.T) {
+	require.Equal(t, "db-x.example.net:3306", HostOfDSN("u:p@tcp(db-x.example.net:3306)/test"))
+	require.Equal(t, "", HostOfDSN("::not a dsn"))
+}
