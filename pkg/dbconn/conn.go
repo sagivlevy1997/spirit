@@ -685,6 +685,19 @@ func NewLazyWithConnectionType(inputDSN string, config *DBConfig, connectionType
 	return db, nil
 }
 
+// WithDialTimeout returns dsn with a dial timeout of d unless it already
+// sets one. For replicas: without it, a black-holed host (no RST) holds the
+// startup ping and every redial for the OS TCP timeout. A DSN that cannot be
+// parsed is returned unchanged for the caller's own error path.
+func WithDialTimeout(dsn string, d time.Duration) string {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil || cfg.Timeout > 0 {
+		return dsn
+	}
+	cfg.Timeout = d
+	return cfg.FormatDSN()
+}
+
 // HostOfDSN returns the host:port a DSN points at, or "" if it cannot be
 // parsed. Use it to name a connection in logs: never log the DSN, it carries
 // the password.

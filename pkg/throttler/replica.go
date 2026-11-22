@@ -16,6 +16,11 @@ var (
 	// the smallest --replica-max-lag is 1s, and a budget polled less often
 	// than its own size is overrun before anything sees it.
 	loopInterval = 1 * time.Second
+	// ReplicaQueryTimeout bounds every round trip to a replica: a poll here,
+	// and each replica in the migration's replica checks. A black-holed
+	// replica (no RST) would otherwise hold a poll -- or the pre-cutover
+	// check, right after the sentinel drop -- for the OS TCP timeout.
+	ReplicaQueryTimeout = 5 * time.Second
 )
 
 // ReplicaSetAsideMsg and ReplicaBackMsg are the two log lines a replica's
@@ -195,11 +200,14 @@ func (l *Replica) BlockWait(ctx context.Context) {
 // failure goes through applyFailure, which decides whether the replica is
 // now set aside.
 func (l *Replica) UpdateLag(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, ReplicaQueryTimeout)
+	defer cancel()
 	var newLagValue int64
 	if err := l.replica.QueryRowContext(ctx, MySQL8LagQuery).Scan(&newLagValue); err != nil {
-		err = fmt.Errorf("could not check replication lag (check that this is a MySQL 8.0 replica, and that performance_schema is enabled): %w", err)
+		// The raw cause is what the DBA reads (a deleted host says "no such
+		// host"); the performance_schema hint stays on the returned error.
 		l.applyFailure(err.Error())
-		return err
+		return fmt.Errorf("could not check replication lag (check that this is a MySQL 8.0 replica, and that performance_schema is enabled): %w", err)
 	}
 	running, why, err := ReplicationRunning(ctx, l.replica)
 	if err != nil {

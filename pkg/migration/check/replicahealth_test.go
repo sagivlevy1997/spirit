@@ -60,7 +60,11 @@ func TestReplicaHealth_NeverBlocks(t *testing.T) {
 	r := Resources{Replicas: []*sql.DB{db}, ReplicaHosts: []string{"db-x:3306"}}
 	err = replicaHealth(t.Context(), r, slog.New(slog.NewTextHandler(&logs, nil)))
 	require.NoError(t, err)
-	require.Contains(t, logs.String(), throttler.ReplicaSetAsideMsg)
+	// A check names the replica but does not set it aside: the throttler is
+	// the only source of set-aside state, so a blip at a check cannot leave a
+	// healthy replica marked set aside for the rest of the engine's life.
+	require.Contains(t, logs.String(), ReplicaIgnoredByCheckMsg)
+	require.NotContains(t, logs.String(), throttler.ReplicaSetAsideMsg)
 	require.Contains(t, logs.String(), "host=db-x:3306")
 	require.NotContains(t, logs.String(), "u:p@")
 }

@@ -1012,6 +1012,7 @@ func (r *Runner) buildReplicaThrottlers() ([]throttler.Throttler, error) {
 		// even be parsed still fails -- that is a configuration bug, not
 		// replica state.
 		host := dbconn.HostOfDSN(dsn)
+		enhancedDSN = dbconn.WithDialTimeout(enhancedDSN, throttler.ReplicaQueryTimeout)
 		replicaDB, err := dbconn.NewWithConnectionType(enhancedDSN, replicaDBConfig, "replica database")
 		if err != nil {
 			r.logger.Debug("replica not reachable at startup; opening it lazily", "host", host, "error", err)

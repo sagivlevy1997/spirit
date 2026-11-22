@@ -17,10 +17,13 @@ func init() {
 // on all configured replicas.
 func replicaPrivilegeCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
 	for i, replica := range r.Replicas {
-		if why := replicaPrivilegeProblem(ctx, replica); why != "" {
-			// A replica we cannot read lag from is set aside, not fatal: the
-			// lag throttler does the same, and the run goes on with the rest.
-			logger.Warn(throttler.ReplicaSetAsideMsg, "host", replicaHostAt(r, i), "reason", why)
+		qctx, cancel := context.WithTimeout(ctx, throttler.ReplicaQueryTimeout)
+		why := replicaPrivilegeProblem(qctx, replica)
+		cancel()
+		if why != "" {
+			// Not fatal: the lag throttler sets such a replica aside and the
+			// run goes on with the rest. Named, never set aside here.
+			logger.Warn(ReplicaIgnoredByCheckMsg, "host", replicaHostAt(r, i), "reason", why)
 		}
 	}
 	return nil
