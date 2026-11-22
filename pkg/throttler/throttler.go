@@ -37,13 +37,19 @@ type GradualThrottler interface {
 // NewReplicationThrottler returns a Throttler for MySQL 8.0+ replicas.
 // It uses performance_schema to monitor replication lag.
 //
-// The returned throttler fails closed: if lag polling stops succeeding for
-// longer than staleSignalThreshold, IsThrottled() reports true and the copy
-// pauses until polling recovers, because an unobservable replica must not
-// silently void the lag budget. See the Replica type for details.
+// A replica that cannot be polled is set aside, never failed closed: see the
+// Replica type. NewReplicationThrottlerForHost names the replica in its logs.
 func NewReplicationThrottler(replica *sql.DB, lagTolerance time.Duration, logger *slog.Logger) (Throttler, error) {
+	return NewReplicationThrottlerForHost(replica, "", lagTolerance, logger)
+}
+
+// NewReplicationThrottlerForHost is NewReplicationThrottler with the
+// replica's host:port, which every log line about it carries. Pass the host,
+// never the DSN: a DSN embeds the password.
+func NewReplicationThrottlerForHost(replica *sql.DB, host string, lagTolerance time.Duration, logger *slog.Logger) (Throttler, error) {
 	return &Replica{
 		replica:      replica,
+		host:         host,
 		lagTolerance: lagTolerance,
 		logger:       logger,
 	}, nil
